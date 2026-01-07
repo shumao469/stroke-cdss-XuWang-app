@@ -2,13 +2,13 @@ import warnings
 import os
 import json
 import time
-import base64
+import webbrowser
 
-# --- [FIX 1] 屏蔽环境版本冲突警告 ---
+# --- [FIX 1] 屏蔽环境版本冲突警告 (解决 SciPy/NumPy 报错) ---
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*NumPy.*")
 
-# --- [FIX 2] 强制使用非交互式后端 ---
+# --- [FIX 2] 强制使用非交互式后端 (解决 PyInstaller 打包时的 Qt/PyQt5 报错) ---
 import matplotlib
 matplotlib.use('Agg') 
 
@@ -25,13 +25,6 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import roc_curve, auc
-
-# 尝试导入 PyGithub
-try:
-    from github import Github, GithubException, Auth
-    HAS_GITHUB = True
-except ImportError:
-    HAS_GITHUB = False
 
 # -----------------------------------------------------------------------------
 # PAGE CONFIGURATION
@@ -80,7 +73,7 @@ TRANSLATIONS = {
         "outcome": {"en": "3. Outcome Prediction", "zh": "3. 转归预测"},
         "report": {"en": "4. Final Clinical Report", "zh": "4. 最终临床报告"}
     },
-    "system_info": {"en": "v8.0 | Persistent Cloud Storage", "zh": "v8.0 | 云端持久化存储"},
+    "system_info": {"en": "v7.0 | Local Repo Storage", "zh": "v7.0 | 本地仓库存储模式"},
     "cohort": {"en": "Patient Cohort", "zh": "患者队列"},
     "new_cases": {"en": "New", "zh": "新增"},
     "proc_time": {"en": "Processing Time", "zh": "处理时间"},
@@ -114,99 +107,62 @@ TRANSLATIONS = {
     "shap_title": {"en": "SHAP Feature Contribution", "zh": "SHAP 特征贡献度"},
     "mod4_title": {"en": "📄 Module 4: Final Report & Storage", "zh": "📄 模块 4: 最终报告与存储"},
     "confirm_data": {"en": "Confirm Data for Storage", "zh": "确认存储数据"},
-    "save_btn": {"en": "💾 Save Report", "zh": "💾 保存报告"},
-    "save_saving": {"en": "Saving...", "zh": "正在保存..."},
-    "save_success": {"en": "✅ Saved successfully!", "zh": "✅ 保存成功！"},
-    "save_fail": {"en": "❌ Save Failed: {}", "zh": "❌ 保存失败: {}"},
-    "storage_mode_cloud": {"en": "☁️ Storage Mode: **GitHub Cloud** (Permanent)", "zh": "☁️ 存储模式: **GitHub 云端** (永久保存)"},
-    "storage_mode_local": {"en": "💻 Storage Mode: **Local/Temporary** (Data lost on restart)", "zh": "💻 存储模式: **本地/临时** (重启后丢失)"},
-    "download_hint": {"en": "⚠️ Note: Click download to save a local copy.", "zh": "⚠️ 注意: 请点击下载以保存本地副本。"},
-    "download_btn": {"en": "📥 Download JSON", "zh": "📥 下载 JSON"}
+    "save_btn": {"en": "💾 Save to Local Repository", "zh": "💾 保存至本地仓库"},
+    "save_saving": {"en": "Saving to local 'reports' folder...", "zh": "正在保存至本地 'reports' 文件夹..."},
+    "save_success": {"en": "✅ Saved! File location: {}", "zh": "✅ 已保存！文件位置: {}"},
+    "save_fail": {"en": "❌ {}", "zh": "❌ {}"},
+    "repo_link_text": {"en": "📂 Open GitHub Repository Page", "zh": "📂 打开 GitHub 仓库页面"}
 }
 
 # -----------------------------------------------------------------------------
-# HYBRID STORAGE ENGINE (Cloud + Local Fallback)
+# LOCAL STORAGE ENGINE (No Token Required)
 # -----------------------------------------------------------------------------
-class HybridStorage:
-    """自动选择 GitHub 或 本地存储"""
+class DataStorage:
+    """处理本地数据存储"""
     
-    LOCAL_DIR = "reports"
+    # 你的 GitHub 仓库地址 (仅用于显示链接)
+    REPO_URL = "https://github.com/shumao469/stroke-data-storage/"
+    LOCAL_DIR = "reports"  # 本地保存的文件夹名称
 
     @staticmethod
-    def get_connection_status():
-        """检查 GitHub 连接状态"""
-        if not HAS_GITHUB:
-            return False, "PyGithub not installed"
-        
-        # 检查 Secrets (Streamlit Cloud 配置)
-        token = st.secrets.get("GITHUB_TOKEN", None)
-        repo = st.secrets.get("REPO_NAME", None)
-        
-        # 兼容 [general] 格式
-        if not token:
-            token = st.secrets.get("general", {}).get("GITHUB_TOKEN", None)
-            repo = st.secrets.get("general", {}).get("REPO_NAME", None)
-
-        if token and repo:
-            return True, f"Connected to {repo}"
-        return False, "Secrets not configured"
+    def ensure_dir():
+        """确保本地 reports 文件夹存在"""
+        if not os.path.exists(DataStorage.LOCAL_DIR):
+            os.makedirs(DataStorage.LOCAL_DIR)
 
     @staticmethod
     def get_cohort_count():
-        """获取总数: 优先从 GitHub 获取，失败则从本地/内存获取"""
+        """获取当前队列总数 (Base 751 + Local Files)"""
         base_count = 751
-        is_cloud, msg = HybridStorage.get_connection_status()
+        DataStorage.ensure_dir()
         
-        if is_cloud:
-            try:
-                g = Github(st.secrets.get("GITHUB_TOKEN") or st.secrets["general"]["GITHUB_TOKEN"])
-                repo_name = st.secrets.get("REPO_NAME") or st.secrets["general"]["REPO_NAME"]
-                repo = g.get_repo(repo_name)
-                contents = repo.get_contents("reports")
-                return base_count + len(contents), len(contents)
-            except Exception:
-                pass # GitHub 读取失败，回退到本地
-        
-        # 本地/内存模式
-        if not os.path.exists(HybridStorage.LOCAL_DIR):
-            return base_count, 0
-        local_files = [f for f in os.listdir(HybridStorage.LOCAL_DIR) if f.endswith('.json')]
-        return base_count + len(local_files), len(local_files)
+        try:
+            # 计算本地 reports 文件夹中的 json 文件数量
+            files = [f for f in os.listdir(DataStorage.LOCAL_DIR) if f.endswith('.json')]
+            new_count = len(files)
+        except Exception:
+            new_count = 0
+            
+        return base_count + new_count, new_count
 
     @staticmethod
     def save_report(patient_data):
-        """保存数据：优先存 GitHub，同时存本地用于下载"""
-        # 1. 总是先存本地 (为了生成下载文件)
-        if not os.path.exists(HybridStorage.LOCAL_DIR):
-            os.makedirs(HybridStorage.LOCAL_DIR)
+        """将报告保存为本地 JSON 文件"""
+        DataStorage.ensure_dir()
         
-        filename = f"{patient_data['id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        local_path = os.path.join(HybridStorage.LOCAL_DIR, filename)
-        
+        # 准备数据 JSON
         json_str = json.dumps(patient_data, indent=4, default=str)
-        with open(local_path, "w", encoding='utf-8') as f:
-            f.write(json_str)
-            
-        # 2. 尝试存 GitHub
-        is_cloud, msg = HybridStorage.get_connection_status()
-        cloud_msg = ""
+        # 生成唯一文件名
+        filename = f"{patient_data['id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        filepath = os.path.join(DataStorage.LOCAL_DIR, filename)
         
-        if is_cloud:
-            try:
-                token = st.secrets.get("GITHUB_TOKEN") or st.secrets["general"]["GITHUB_TOKEN"]
-                repo_name = st.secrets.get("REPO_NAME") or st.secrets["general"]["REPO_NAME"]
-                g = Github(token)
-                repo = g.get_repo(repo_name)
-                
-                # 上传文件
-                repo.create_file(f"reports/{filename}", f"Add report {patient_data['id']}", json_str)
-                cloud_msg = " & Uploaded to GitHub Cloud ☁️"
-            except Exception as e:
-                cloud_msg = f" (Cloud Upload Failed: {str(e)})"
-        else:
-            cloud_msg = " (Local Storage Only 💻)"
-
-        return True, f"Saved locally{cloud_msg}", local_path
+        try:
+            with open(filepath, "w", encoding='utf-8') as f:
+                f.write(json_str)
+            # 返回绝对路径以便显示
+            return True, os.path.abspath(filepath)
+        except Exception as e:
+            return False, f"Local Save Error: {str(e)}"
 
 # -----------------------------------------------------------------------------
 # HELPER FUNCTIONS
@@ -385,6 +341,7 @@ def main():
         p_nihss = st.slider("NIHSS Score", 0, 42, 5, help=TRANSLATIONS["nihss_help"][lc])
         p_gcs = st.slider("GCS Score", 3, 15, 15, help=TRANSLATIONS["gcs_help"][lc])
         
+        # Translate History Options logic
         hist_ops = TRANSLATIONS["hist_options"][lc]
         p_history = st.multiselect(TRANSLATIONS["history"][lc], hist_ops, [hist_ops[0]])
         
@@ -402,19 +359,13 @@ def main():
         TRANSLATIONS["modules"]["report"][lc]
     ]
     app_mode = st.sidebar.radio(TRANSLATIONS["module_select"][lc], mod_ops)
-    
-    # Check Storage Status
-    is_cloud, msg = HybridStorage.get_connection_status()
-    if is_cloud:
-        st.sidebar.success(TRANSLATIONS["storage_mode_cloud"][lc])
-    else:
-        st.sidebar.warning(TRANSLATIONS["storage_mode_local"][lc])
+    st.sidebar.info(TRANSLATIONS["system_info"][lc])
 
     # --- HOME ---
     if app_mode == mod_ops[0]:
         st.title(TRANSLATIONS["app_title"][lc])
         
-        total_cohort, new_cases = HybridStorage.get_cohort_count()
+        total_cohort, new_cases = DataStorage.get_cohort_count()
         nihss_txt, nihss_col = get_nihss_grade(p_nihss, lc)
         gcs_txt, gcs_col = get_gcs_grade(p_gcs, lc)
         
@@ -426,6 +377,9 @@ def main():
         st.divider()
         st.markdown(TRANSLATIONS["current_pt_info"][lc].format(p_id, p_gender_raw, p_age, p_status))
         st.info(TRANSLATIONS["sampling_info"][lc].format(p_time.strftime('%H:%M'), datetime.now().strftime('%Y-%m-%d')))
+        
+        # 显示仓库链接
+        st.markdown(f"[{TRANSLATIONS['repo_link_text'][lc]}]({DataStorage.REPO_URL})")
         st.markdown(TRANSLATIONS["select_hint"][lc])
 
     # --- MODULE 1: TRIAGE ---
@@ -532,23 +486,23 @@ def main():
             }
             
             with st.spinner(TRANSLATIONS["save_saving"][lc]):
-                success, msg, path = HybridStorage.save_report(report_data)
+                success, path = DataStorage.save_report(report_data)
             
             if success:
                 st.balloons()
-                st.success(TRANSLATIONS["save_success"][lc].format(msg))
+                st.success(TRANSLATIONS["save_success"][lc].format(path))
                 st.json(report_data)
                 
-                # Download Button Logic
+                # 添加下载按钮
                 json_str = json.dumps(report_data, indent=4, default=str)
                 st.download_button(
-                    label=TRANSLATIONS["download_btn"][lc],
+                    label="📥 Download JSON",
                     data=json_str,
                     file_name=os.path.basename(path),
                     mime="application/json"
                 )
             else:
-                st.error(TRANSLATIONS["save_fail"][lc].format(msg))
+                st.error(TRANSLATIONS["save_fail"][lc].format(path))
 
 if __name__ == "__main__":
     main()
