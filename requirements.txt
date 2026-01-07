@@ -5,4 +5,3 @@ matplotlib
 seaborn
 plotly
 scikit-learn
-PyGithub
